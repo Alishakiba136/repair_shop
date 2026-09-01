@@ -1,0 +1,6 @@
+{
+  "name": "Kleinanzeigen Scraper & AI Dashboard",
+  "description": "Multi-user Flask web application and background Playwright scraper with SQLite storage, user settings dashboard, Telegram alerts, and Gemini AI profitability analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
