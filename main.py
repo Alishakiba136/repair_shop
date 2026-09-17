@@ -25,8 +25,11 @@ from datetime import datetime
 from typing import Dict, List, Set, Any, Optional
 from urllib.parse import quote_plus
 
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 from local_llm_analyzer import LocalLLMAnalyzer
+
+load_dotenv()
 
 # ==========================================
 # 1. Configuration & Constants
@@ -245,23 +248,29 @@ async def handle_cookie_consent(page: Page) -> None:
 async def extract_listings_from_page(page: Page, seen_ids: Set[str]) -> List[Dict[str, Any]]:
     """
     Parses all search result article cards on the current page.
-    
-    Kleinanzeigen DOM Structure (as of 2024-2026):
-    - Container: `article.aditem` or `li.ad-listitem`
+
+    Kleinanzeigen DOM Structure (current and legacy):
+    - Current cards: `li[data-clickable="card"] article[data-adid]`
+    - Legacy cards: `article.aditem`, `li.ad-listitem article`
     - Attribute: `data-adid` provides unique integer listing ID (e.g. '2738918231')
-    - Title & Link: `.aditem-main h2 a` or `.text-module-begin a`
-    - Price: `.aditem-main--middle--price-shipping--price` or `.aditem-details strong`
-    - Description snippet: `.aditem-main--middle--description` or `.aditem-main p`
-    - Location: `.aditem-main--top--left` (e.g., "44137 Dortmund - Mitte")
-    - Post Date: `.aditem-main--top--right` (e.g., "Heute, 14:20" or "28.08.2026")
-    
+    - Title & Link: `.text-module-begin a`, `.ellipsis`, or legacy `.aditem-main h2 a`
+    - Price: `.aditem-main--middle--price-shipping--price`, `.aditem-details strong`, or current-price selectors
+    - Description snippet: `.aditem-main--middle--description`, `.aditem-main p`, or generic text blocks
+    - Location: `.aditem-main--top--left` or a simple text region in the current card
+    - Post Date: `.aditem-main--top--right`
+
     Returns:
         List of newly extracted item dictionaries.
     """
     extracted_items: List[Dict[str, Any]] = []
 
-    # Locate listing containers
-    listing_elements = page.locator("article.aditem, li.ad-listitem article")
+    # Locate listing containers using both current and legacy markup.
+    listing_elements = page.locator(
+        "li[data-clickable='card'] article[data-adid], "
+        "article[data-adid], "
+        "article.aditem, "
+        "li.ad-listitem article"
+    )
     count = await listing_elements.count()
     logger.info(f"Found {count} listing cards on page.")
 
@@ -275,10 +284,10 @@ async def extract_listings_from_page(page: Page, seen_ids: Set[str]) -> List[Dic
         try:
             # 1. Extract Listing ID (data-adid)
             listing_id = await item_locator.get_attribute("data-adid")
-            
+
             # If not in data attribute, try fallback from data-href or title link
             if not listing_id:
-                link_href = await item_locator.locator("a.ellipsis, h2 a, a[href*='/s-anzeige/']").first.get_attribute("href")
+                link_href = await item_locator.locator("[data-href], a.ellipsis, h2 a, a[href*='/s-anzeige/']").first.get_attribute("href")
                 if link_href and "/s-anzeige/" in link_href:
                     # e.g., /s-anzeige/defekter-laptop-dortmund/2738918231-168-2078 -> 2738918231
                     parts = link_href.split("/")[-1].split("-")
@@ -294,29 +303,42 @@ async def extract_listings_from_page(page: Page, seen_ids: Set[str]) -> List[Dic
                 continue
 
             # 2. Extract Title & URL
-            title_elem = item_locator.locator("h2 a, a.ellipsis, .text-module-begin a").first
+            title_elem = item_locator.locator("h2 a, a.ellipsis, .text-module-begin a, .aditem-main h2 a").first
             title = await title_elem.inner_text() if await title_elem.count() > 0 else "N/A"
             title = title.strip()
 
             rel_url = await title_elem.get_attribute("href") if await title_elem.count() > 0 else ""
+            if not rel_url:
+                rel_url = await item_locator.get_attribute("data-href") or ""
             item_url = f"{BASE_URL}{rel_url}" if rel_url and rel_url.startswith("/") else (rel_url or "N/A")
 
             # 3. Extract Price
             price_elem = item_locator.locator(
-                ".aditem-main--middle--price-shipping--price, .aditem-details strong, p[class*='price']"
+                ".aditem-main--middle--price-shipping--price, "
+                ".aditem-details strong, "
+                "p[class*='price'], "
+                "p[class*='Price'], "
+                "[class*='price']"
             ).first
             price = await price_elem.inner_text() if await price_elem.count() > 0 else "Zu verschenken / VB"
             price = price.strip().replace("\n", " ")
 
             # 4. Extract Description Snippet
             desc_elem = item_locator.locator(
-                ".aditem-main--middle--description, .aditem-main p, p.aditem-main--description"
+                ".aditem-main--middle--description, "
+                ".aditem-main p, "
+                "p.aditem-main--description, "
+                "[class*='description']"
             ).first
             description = await desc_elem.inner_text() if await desc_elem.count() > 0 else ""
             description = description.strip().replace("\n", " ")
 
             # 5. Extract Location / District in Dortmund
-            loc_elem = item_locator.locator(".aditem-main--top--left, .aditem-details span").first
+            loc_elem = item_locator.locator(
+                ".aditem-main--top--left, "
+                "[class*='location'], "
+                "div:has-text('Dortmund')"
+            ).first
             location = await loc_elem.inner_text() if await loc_elem.count() > 0 else DEFAULT_LOCATION_NAME
             location = location.strip().replace("\n", " ")
 

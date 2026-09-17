@@ -6,3 +6,17 @@ coverage/
 *.log
 .env*
 !.env.example
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.json
+!package.json
+!package-lock.json
+!requirements.txt
+!README.md
+!*.example
+!*.env.example
+extracted_defective_listings.json
+seen_listings.json

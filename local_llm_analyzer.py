@@ -25,7 +25,11 @@ import os
 import re
 import time
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
 import requests
+
+load_dotenv()
 
 # Set up dedicated logger for LLM operations
 logger = logging.getLogger("LLMAnalyzer")
@@ -45,28 +49,19 @@ if not logger.hasHandlers():
 
 
 # System prompt designed for precise repairability & resale profit calculations
-ANALYSIS_SYSTEM_PROMPT = """You are an expert electronics technician and electronics flipping specialist in Germany (Kleinanzeigen marketplace).
-Evaluate the defective item listing provided. Determine:
-1. Detected hardware issues from title and German description.
-2. Estimated replacement parts and their market cost in EUR (e.g. eBay/AliExpress replacement screen, pump, capacitor, HDMI port).
-3. Estimated total repair cost in EUR.
-4. Estimated realistic refurbished resale value in EUR in Germany.
-5. Profit margin = (Refurbished Value) - (Purchase Price + Repair Cost).
-6. Whether it is profitable (profit margin >= min_profit_threshold AND repair cost <= max_repair_budget).
-7. Concise technical reasoning in German/English.
-
-CRITICAL: Return ONLY a valid JSON object with NO markdown ticks, NO extra text:
+ANALYSIS_SYSTEM_PROMPT = """You are an expert electronics repair/flipping analyst for Germany.
+Return only one compact JSON object and nothing else.
+Schema:
 {
   "detected_issues": ["issue 1", "issue 2"],
-  "estimated_replacement_parts": [
-    {"part_name": "Part A", "cost_eur": 15.0}
-  ],
+  "estimated_replacement_parts": [{"part_name": "Part A", "cost_eur": 15.0}],
   "estimated_repair_cost_total": 25.0,
   "estimated_refurbished_value": 140.0,
   "is_profitable": true,
   "profit_margin_eur": 75.0,
-  "reasoning_summary": "Short technical assessment of repair effort and profitability"
+  "reasoning_summary": "very short explanation"
 }
+Use realistic Germany-market values. Keep the JSON small and complete; no markdown, no commentary.
 """
 
 
@@ -265,7 +260,8 @@ ITEM DETAILS TO EVALUATE:
                 "format": "json",
                 "options": {
                     "temperature": 0.2,
-                    "num_ctx": 4096
+                    "num_ctx": 4096,
+                    "num_predict": 600,
                 }
             }
             resp = requests.post(url, json=payload, timeout=self.timeout_sec)
@@ -346,7 +342,7 @@ ITEM DETAILS TO EVALUATE:
     def _extract_json(self, raw_text: str) -> Dict[str, Any]:
         """
         Robustly extracts and parses JSON payload from LLM responses even if wrapped
-        in Markdown codeblocks.
+        in Markdown codeblocks or cut off mid-generation by the model.
         """
         cleaned = raw_text.strip()
         # Remove Markdown formatting if present
@@ -355,21 +351,69 @@ ITEM DETAILS TO EVALUATE:
             cleaned = re.sub(r"\n?```$", "", cleaned)
         cleaned = cleaned.strip()
 
-        try:
-            parsed = json.loads(cleaned)
-            # Ensure mandatory fields
-            return {
-                "detected_issues": parsed.get("detected_issues", ["General defect / Bastler"]),
-                "estimated_replacement_parts": parsed.get("estimated_replacement_parts", []),
-                "estimated_repair_cost_total": float(parsed.get("estimated_repair_cost_total", 25.0)),
-                "estimated_refurbished_value": float(parsed.get("estimated_refurbished_value", 100.0)),
-                "is_profitable": bool(parsed.get("is_profitable", False)),
-                "profit_margin_eur": float(parsed.get("profit_margin_eur", 0.0)),
-                "reasoning_summary": parsed.get("reasoning_summary", "Analyzed by AI model."),
-            }
-        except Exception as e:
-            logger.warning(f"Failed to parse LLM JSON response: {e}. Raw was: {raw_text[:100]}...")
-            raise ValueError(f"Invalid JSON returned from model: {e}")
+        candidates = [cleaned]
+
+        # Some local models (notably Ollama) occasionally return a valid JSON object
+        # that is cut off before the closing braces/brackets are emitted.
+        start = cleaned.find("{")
+        if start != -1:
+            candidates.append(cleaned[start:])
+
+        # Try the most permissive repair: close any still-open arrays/objects and
+        # repair the final dangling quote if the model terminated mid-string.
+        if start != -1:
+            candidate = cleaned[start:]
+            stack: List[str] = []
+            in_string = False
+            escape = False
+            for ch in candidate:
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                    continue
+
+                if ch == '"':
+                    in_string = True
+                elif ch in "[{":
+                    stack.append(ch)
+                elif ch in "]}":
+                    if stack:
+                        opener = stack.pop()
+                        expected = "}" if opener == "{" else "]"
+                        if ch != expected:
+                            stack.append(opener)
+                            break
+
+            if in_string:
+                candidate += '"'
+            while stack:
+                opener = stack.pop()
+                candidate += "}" if opener == "{" else "]"
+            candidates.append(candidate)
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                # Ensure mandatory fields
+                return {
+                    "detected_issues": parsed.get("detected_issues", ["General defect / Bastler"]),
+                    "estimated_replacement_parts": parsed.get("estimated_replacement_parts", []),
+                    "estimated_repair_cost_total": float(parsed.get("estimated_repair_cost_total", 25.0)),
+                    "estimated_refurbished_value": float(parsed.get("estimated_refurbished_value", 100.0)),
+                    "is_profitable": bool(parsed.get("is_profitable", False)),
+                    "profit_margin_eur": float(parsed.get("profit_margin_eur", 0.0)),
+                    "reasoning_summary": parsed.get("reasoning_summary", "Analyzed by AI model."),
+                }
+            except Exception as e:
+                last_error = e
+
+        logger.warning(f"Failed to parse LLM JSON response: {last_error}. Raw was: {raw_text[:100]}...")
+        raise ValueError(f"Invalid JSON returned from model: {last_error}")
 
     def _heuristic_fallback_analysis(
         self,

@@ -30,6 +30,7 @@ from main import (
     DEFAULT_KEYWORDS,
     LOCATION_ID
 )
+from local_llm_analyzer import LocalLLMAnalyzer
 
 # Sample mock HTML fragment representing Kleinanzeigen listing DOM structure
 MOCK_LISTINGS_HTML = """
@@ -96,6 +97,49 @@ MOCK_LISTINGS_HTML = """
 </html>
 """
 
+CURRENT_KLEINANZEIGEN_DOM_HTML = """
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="utf-8"><title>Blaster in Dortmund | Kleinanzeigen</title></head>
+<body>
+  <div id="site-content">
+    <ul id="srchrslt-adtable">
+      <li data-clickable="card" class="relative mb-xsmall rounded-small border border-utilityNonessential bg-surface">
+        <article class="flex justify-between p-medium" data-adid="3473953164" data-href="/s-anzeige/nerf-fortnite-ts-blaster/3473953164-23-2078">
+          <div class="relative z-raised basis-[200px]">
+            <div class="aditem-main--top">
+              <div class="aditem-main--top--left">Dortmund</div>
+              <div class="aditem-main--top--right">Heute, 10:12</div>
+            </div>
+            <h2 class="text-module-begin">
+              <a class="ellipsis" href="/s-anzeige/nerf-fortnite-ts-blaster/3473953164-23-2078">Nerf Fortnite TS Blaster</a>
+            </h2>
+            <p class="aditem-main--middle--description">NEU mit kleiner Delle, abholung in Dortmund.</p>
+            <p class="aditem-main--middle--price-shipping--price">49 € VB</p>
+          </div>
+        </article>
+      </li>
+      <li data-clickable="card" class="relative mb-xsmall rounded-small border border-utilityNonessential bg-surface">
+        <article class="flex justify-between p-medium" data-adid="3474000001" data-href="/s-anzeige/airsoft-blaster-defekt/3474000001-23-2078">
+          <div class="relative z-raised basis-[200px]">
+            <div class="aditem-main--top">
+              <div class="aditem-main--top--left">Dortmund</div>
+              <div class="aditem-main--top--right">Gestern, 19:55</div>
+            </div>
+            <h2 class="text-module-begin">
+              <a class="ellipsis" href="/s-anzeige/airsoft-blaster-defekt/3474000001-23-2078">Airsoft Blaster defekt</a>
+            </h2>
+            <p class="aditem-main--middle--description">Für Bastler, Motor defekt, Ersatzteile.</p>
+            <p class="aditem-main--middle--price-shipping--price">18 €</p>
+          </div>
+        </article>
+      </li>
+    </ul>
+  </div>
+</body>
+</html>
+"""
+
 # ==========================================
 # 1. URL Generation Tests
 # ==========================================
@@ -112,6 +156,27 @@ def test_build_search_url_pagination():
     assert "seite:3" in url
     assert "k0l2078" in url
     assert "/s-dortmund/" in url
+
+
+def test_extract_json_handles_truncated_llm_output():
+    """Ollama can return a valid JSON object that gets cut off mid-response; the parser should recover it."""
+    analyzer = LocalLLMAnalyzer()
+    truncated = '''{
+  "detected_issues": ["No power", "Wobbly charging port"],
+  "estimated_replacement_parts": [
+    {"part_name": "Display", "cost_eur": 65.0},
+    {"part_name": "Charging Port", "cost_eur": 8.0}
+  ],
+  "estimated_repair_cost_total": 93.0,
+  "estimated_refurbished_value": 170.0,
+  "is_profitable": true,
+  "profit_margin_eur": 47.0,
+  "reasoning_summary": "Laptop requires display"
+'''
+    parsed = analyzer._extract_json(truncated)
+    assert parsed["estimated_repair_cost_total"] == 93.0
+    assert parsed["is_profitable"] is True
+    assert "Display" in parsed["estimated_replacement_parts"][0]["part_name"]
 
 
 # ==========================================
@@ -205,6 +270,24 @@ async def test_deduplication_filters_already_seen():
     # Only item 2 should be extracted
     assert len(extracted) == 1
     assert extracted[0]["listing_id"] == "2839109999"
+
+
+@pytest.mark.asyncio
+async def test_extract_listings_from_current_kleinanzeigen_dom():
+    """Verify the selector works against the current site's card markup."""
+    seen_ids = set()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(CURRENT_KLEINANZEIGEN_DOM_HTML)
+
+        extracted = await extract_listings_from_page(page, seen_ids)
+        await browser.close()
+
+    assert len(extracted) == 2
+    assert {item["listing_id"] for item in extracted} == {"3473953164", "3474000001"}
+    assert any("Blaster" in item["title"] or "blaster" in item["title"].lower() for item in extracted)
 
 
 # ==========================================
