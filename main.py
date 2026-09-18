@@ -28,6 +28,7 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 from local_llm_analyzer import LocalLLMAnalyzer
+from telegram_notify import send_telegram_message
 
 load_dotenv()
 
@@ -495,6 +496,28 @@ async def run_scraper(
     logger.info("-" * 60)
     logger.info(f"Execution complete. New items extracted: {len(all_new_listings)}. Total seen: {len(seen_ids)} (+{len(seen_ids) - initial_seen_count})")
     logger.info("-" * 60)
+
+    # Notify via Telegram if configured and new listings were found
+    if all_new_listings:
+        try:
+            summary_lines = [f"New listings: {len(all_new_listings)}"]
+            # Include brief lines for up to 5 items
+            for itm in all_new_listings[:5]:
+                lid = itm.get("listing_id")
+                title = itm.get("title", "")
+                price = itm.get("price", "")
+                url = itm.get("item_url", "")
+                summary_lines.append(f"• {price} — {title} ({url})")
+
+            if len(all_new_listings) > 5:
+                summary_lines.append(f"...and {len(all_new_listings) - 5} more listings")
+
+            message_text = "\n".join(summary_lines)
+            # send_telegram_message will read env vars if token/chat not provided
+            send_telegram_message(text=message_text)
+            logger.info("Telegram notification sent for new listings.")
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram notification: {e}")
 
     return all_new_listings
 
